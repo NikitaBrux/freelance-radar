@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -70,5 +72,26 @@ async def main() -> None:
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
+async def health_server() -> None:
+    """Минимальный HTTP-сервер для Railway healthcheck."""
+    port = int(os.getenv("PORT", "8080"))
+
+    async def handle(_: web.Request) -> web.Response:
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info("Health server запущен на порту %d", port)
+
+
+async def run() -> None:
+    """Запустить бота и health-сервер одновременно."""
+    await asyncio.gather(main(), health_server())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(run())
