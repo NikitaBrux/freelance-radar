@@ -4,3 +4,4 @@ builder = "dockerfile"
 [deploy]
 startCommand = "python bot/main.py"
 restartPolicyType = "always"
+healthcheckPath = ""
