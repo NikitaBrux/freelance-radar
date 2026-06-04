@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    container_name: freelance_radar_bot
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Персистентное хранение SQLite-базы и сессии Telethon
+      - ./data:/app/data
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///./data/freelance_radar.db
+    working_dir: /app
