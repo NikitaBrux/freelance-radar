@@ -5,8 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from config import config
 from db.models import Base
 
-# Railway даёт URL вида postgresql://, заменяем на asyncpg-совместимый
-_db_url = config.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+# Railway может давать postgres:// или postgresql:// — приводим к asyncpg-формату
+_db_url = config.DATABASE_URL
+if _db_url.startswith("postgres://"):
+    _db_url = "postgresql+asyncpg://" + _db_url[len("postgres://"):]
+elif _db_url.startswith("postgresql://"):
+    _db_url = "postgresql+asyncpg://" + _db_url[len("postgresql://"):]
 
 engine = create_async_engine(_db_url, echo=False)
 

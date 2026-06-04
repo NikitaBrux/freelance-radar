@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def on_startup(bot: Bot) -> None:
     """Действия при запуске бота."""
+    logger.info("BOT_TOKEN задан: %s", bool(config.BOT_TOKEN))
     logger.info("Инициализация базы данных...")
     await init_db()
 
