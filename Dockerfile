@@ -14,4 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Скопировать исходный код
 COPY . .
 
+ENV PYTHONPATH=/app
+
 CMD ["python", "bot/main.py"]
