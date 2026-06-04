@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 # Площадки по умолчанию (все включены)
-DEFAULT_SOURCES = ["fl.ru", "kwork", "telegram"]
+DEFAULT_SOURCES = ["fl.ru", "kwork"]
 
 
 class FilterSetup(StatesGroup):
