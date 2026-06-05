@@ -1,11 +1,10 @@
-"""Парсер Kwork.ru — раздел «Проекты / Разработка»."""
+"""Парсер Хабр Карьеры (фриланс-проекты) через RSS."""
 
-import asyncio
 import hashlib
 import logging
-import random
 import re
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 from bs4 import BeautifulSoup
 
@@ -13,76 +12,74 @@ from parsers.base import BaseParser, ParsedOrder
 
 logger = logging.getLogger(__name__)
 
-KWORK_URL = "https://kwork.ru/projects?c=11"  # категория 11 — разработка
+# RSS фриланс-проектов с Хабр Карьеры
+HABR_RSS_URL = "https://career.habr.com/vacancies/rss?type=remote&specializations=1"
 
 
 class KworkParser(BaseParser):
-    """Парсит раздел заказов на kwork.ru."""
+    """Парсит RSS удалённых вакансий с Хабр Карьеры."""
 
     source_name = "kwork"
 
     async def fetch(self) -> list[ParsedOrder]:
-        """Вернуть список заказов с Kwork."""
+        """Вернуть список заказов из RSS Хабр Карьеры."""
         try:
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-
             async with await self._get_client() as client:
-                response = await client.get(KWORK_URL)
+                response = await client.get(HABR_RSS_URL)
                 response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            orders = self._parse_projects(soup)
-            logger.info("Kwork: получено %d заказов", len(orders))
+            soup = BeautifulSoup(response.text, "xml")
+            items = soup.find_all("item")
+            orders = []
+
+            for item in items:
+                try:
+                    order = self._parse_item(item)
+                    if order:
+                        orders.append(order)
+                except Exception as exc:
+                    logger.debug("Хабр Карьера RSS: ошибка разбора item: %s", exc)
+                    continue
+
+            logger.info("Хабр Карьера: получено %d вакансий из RSS", len(orders))
             return orders
 
         except Exception as exc:
-            logger.error("Ошибка парсинга Kwork: %s", exc)
+            logger.error("Ошибка парсинга Хабр Карьеры RSS: %s", exc)
             return []
 
-    def _parse_projects(self, soup: BeautifulSoup) -> list[ParsedOrder]:
-        """Извлечь заказы из HTML."""
-        orders: list[ParsedOrder] = []
+    def _parse_item(self, item) -> ParsedOrder | None:
+        """Разобрать один RSS-элемент."""
+        title_tag = item.find("title")
+        link_tag = item.find("link")
+        desc_tag = item.find("description")
+        pub_tag = item.find("pubDate")
+        guid_tag = item.find("guid")
 
-        # Карточки проектов
-        cards = soup.select(".wants-card, .project-card, article.want")
-        if not cards:
-            cards = soup.select("div[class*='project']")
-
-        for card in cards:
-            try:
-                order = self._parse_card(card)
-                if order:
-                    orders.append(order)
-            except Exception as exc:
-                logger.debug("Kwork: ошибка разбора карточки: %s", exc)
-                continue
-
-        return orders
-
-    def _parse_card(self, card) -> ParsedOrder | None:
-        """Разобрать карточку заказа."""
-        # Заголовок
-        title_tag = card.select_one("a.wants-card__header-title, .project-card__title a, h2 a")
-        if not title_tag:
+        if not title_tag or not link_tag:
             return None
 
         title = title_tag.get_text(strip=True)
-        href = title_tag.get("href", "")
-        if not href:
-            return None
+        url = link_tag.get_text(strip=True)
 
-        url = f"https://kwork.ru{href}" if href.startswith("/") else href
+        # Описание — убираем HTML-теги
+        raw_desc = desc_tag.get_text(strip=True) if desc_tag else ""
+        description = BeautifulSoup(raw_desc, "html.parser").get_text(strip=True)
 
-        # External ID из URL или хеш
-        match = re.search(r"/projects/(\d+)/", href)
-        external_id = match.group(1) if match else hashlib.md5(url.encode()).hexdigest()[:12]
+        # External ID
+        guid = guid_tag.get_text(strip=True) if guid_tag else url
+        external_id = hashlib.md5(guid.encode()).hexdigest()[:16]
 
-        # Описание
-        desc_tag = card.select_one(".wants-card__description, .project-card__description")
-        description = desc_tag.get_text(strip=True) if desc_tag else ""
+        # Время публикации
+        published_at = datetime.utcnow()
+        if pub_tag:
+            try:
+                published_at = parsedate_to_datetime(pub_tag.get_text(strip=True)).replace(tzinfo=None)
+            except Exception:
+                pass
 
-        # Бюджет
-        budget = self._parse_budget(card)
+        # Бюджет из описания
+        budget = self._extract_budget(description)
 
         return ParsedOrder(
             title=title,
@@ -91,18 +88,21 @@ class KworkParser(BaseParser):
             source=self.source_name,
             external_id=external_id,
             budget=budget,
-            published_at=datetime.utcnow(),
+            published_at=published_at,
         )
 
-    def _parse_budget(self, card) -> int | None:
-        """Извлечь бюджет."""
-        budget_tag = card.select_one(".wants-card__price, .project-card__price, .price")
-        if not budget_tag:
-            return None
-
-        text = budget_tag.get_text(strip=True)
-        digits = re.sub(r"[^\d]", "", text)
-        if digits:
-            # Kwork показывает диапазон — берём минимальное
-            return int(digits[:8])  # обрезаем на случай конкатенации
+    def _extract_budget(self, text: str) -> int | None:
+        """Извлечь зарплату/бюджет из текста."""
+        patterns = [
+            r"от\s+(\d[\d\s]+)\s*(?:руб|₽|р\.?)",
+            r"(\d[\d\s]{3,})\s*(?:руб|₽|р\.?)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                digits = re.sub(r"\s", "", match.group(1))
+                if digits.isdigit():
+                    amount = int(digits)
+                    if 100 <= amount <= 100_000_000:
+                        return amount
         return None

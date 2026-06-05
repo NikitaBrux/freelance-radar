@@ -1,11 +1,10 @@
-"""Парсер FL.ru — фриланс-биржа."""
+"""Парсер FL.ru через RSS-ленту."""
 
-import asyncio
 import hashlib
 import logging
-import random
 import re
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 from bs4 import BeautifulSoup
 
@@ -13,78 +12,74 @@ from parsers.base import BaseParser, ParsedOrder
 
 logger = logging.getLogger(__name__)
 
-FL_URL = "https://www.fl.ru/projects/?category=1"
+# RSS всех проектов FL.ru
+FL_RSS_URL = "https://www.fl.ru/rss/all.xml"
 
 
 class FlRuParser(BaseParser):
-    """Парсит раздел IT-проекты на fl.ru."""
+    """Парсит RSS-ленту FL.ru."""
 
     source_name = "fl.ru"
 
     async def fetch(self) -> list[ParsedOrder]:
-        """Вернуть список заказов с FL.ru."""
+        """Вернуть список заказов из RSS FL.ru."""
         try:
-            # Случайная задержка 1-3 секунды перед запросом
-            await asyncio.sleep(random.uniform(1.0, 3.0))
-
             async with await self._get_client() as client:
-                response = await client.get(FL_URL)
+                response = await client.get(FL_RSS_URL)
                 response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            orders = self._parse_projects(soup)
-            logger.info("FL.ru: получено %d заказов", len(orders))
+            soup = BeautifulSoup(response.text, "xml")
+            items = soup.find_all("item")
+            orders = []
+
+            for item in items:
+                try:
+                    order = self._parse_item(item)
+                    if order:
+                        orders.append(order)
+                except Exception as exc:
+                    logger.debug("FL.ru RSS: ошибка разбора item: %s", exc)
+                    continue
+
+            logger.info("FL.ru: получено %d заказов из RSS", len(orders))
             return orders
 
         except Exception as exc:
-            logger.error("Ошибка парсинга FL.ru: %s", exc)
+            logger.error("Ошибка парсинга FL.ru RSS: %s", exc)
             return []
 
-    def _parse_projects(self, soup: BeautifulSoup) -> list[ParsedOrder]:
-        """Извлечь заказы из HTML-страницы."""
-        orders: list[ParsedOrder] = []
+    def _parse_item(self, item) -> ParsedOrder | None:
+        """Разобрать один RSS-элемент."""
+        title_tag = item.find("title")
+        link_tag = item.find("link")
+        desc_tag = item.find("description")
+        pub_tag = item.find("pubDate")
+        guid_tag = item.find("guid")
 
-        # Блоки с проектами
-        project_blocks = soup.select("div.b-post.b-post_pad_all")
-        if not project_blocks:
-            # Запасной селектор
-            project_blocks = soup.select("article.b-post")
-
-        for block in project_blocks:
-            try:
-                order = self._parse_single_project(block)
-                if order:
-                    orders.append(order)
-            except Exception as exc:
-                logger.debug("FL.ru: ошибка разбора блока: %s", exc)
-                continue
-
-        return orders
-
-    def _parse_single_project(self, block) -> ParsedOrder | None:
-        """Разобрать один блок проекта."""
-        # Заголовок и ссылка
-        title_tag = block.select_one("h2 a, .b-post__title a")
-        if not title_tag:
+        if not title_tag or not link_tag:
             return None
 
         title = title_tag.get_text(strip=True)
-        href = title_tag.get("href", "")
-        if not href:
-            return None
+        url = link_tag.get_text(strip=True)
 
-        url = f"https://www.fl.ru{href}" if href.startswith("/") else href
+        # Описание — убираем HTML-теги
+        raw_desc = desc_tag.get_text(strip=True) if desc_tag else ""
+        description = BeautifulSoup(raw_desc, "html.parser").get_text(strip=True)
 
-        # Уникальный ID из URL
-        match = re.search(r"/projects/(\d+)/", href)
-        external_id = match.group(1) if match else hashlib.md5(url.encode()).hexdigest()[:12]
+        # External ID из guid или URL
+        guid = guid_tag.get_text(strip=True) if guid_tag else url
+        external_id = hashlib.md5(guid.encode()).hexdigest()[:16]
 
-        # Описание
-        desc_tag = block.select_one(".b-post__body, .b-post__descr")
-        description = desc_tag.get_text(strip=True) if desc_tag else ""
+        # Время публикации
+        published_at = datetime.utcnow()
+        if pub_tag:
+            try:
+                published_at = parsedate_to_datetime(pub_tag.get_text(strip=True)).replace(tzinfo=None)
+            except Exception:
+                pass
 
-        # Бюджет
-        budget = self._parse_budget(block)
+        # Попытка извлечь бюджет из описания
+        budget = self._extract_budget(description)
 
         return ParsedOrder(
             title=title,
@@ -93,18 +88,21 @@ class FlRuParser(BaseParser):
             source=self.source_name,
             external_id=external_id,
             budget=budget,
-            published_at=datetime.utcnow(),
+            published_at=published_at,
         )
 
-    def _parse_budget(self, block) -> int | None:
-        """Извлечь бюджет в рублях."""
-        budget_tag = block.select_one(".b-post__price, .price")
-        if not budget_tag:
-            return None
-
-        text = budget_tag.get_text(strip=True)
-        # Убрать всё кроме цифр
-        digits = re.sub(r"[^\d]", "", text)
-        if digits:
-            return int(digits)
+    def _extract_budget(self, text: str) -> int | None:
+        """Извлечь бюджет из текста описания."""
+        patterns = [
+            r"Бюджет[:\s]+(\d[\d\s]*)",
+            r"(\d[\d\s]{3,})\s*(?:руб|₽|р\.?)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                digits = re.sub(r"\s", "", match.group(1))
+                if digits.isdigit():
+                    amount = int(digits)
+                    if 100 <= amount <= 100_000_000:
+                        return amount
         return None

@@ -17,8 +17,7 @@ router = Router()
 # Иконки для источников
 SOURCE_EMOJI = {
     "fl.ru": "🔵",
-    "kwork": "🟠",
-    "telegram": "✈️",
+    "kwork": "🟢",  # Хабр Карьера
 }
 
 

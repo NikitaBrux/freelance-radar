@@ -21,7 +21,7 @@ def sources_keyboard(selected: list[str]) -> InlineKeyboardMarkup:
     """Чекбоксы выбора площадок."""
     all_sources = [
         ("fl.ru", "FL.ru"),
-        ("kwork", "Kwork"),
+        ("kwork", "Хабр Карьера"),
     ]
     builder = InlineKeyboardBuilder()
     for source_id, label in all_sources:
